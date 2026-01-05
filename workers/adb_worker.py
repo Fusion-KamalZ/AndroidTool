@@ -164,12 +164,18 @@ class ADBWorker(QThread):
         
         self.progress.emit(f"Found {len(apk_paths)} APK file(s)")
         
-        # Create directories
+        # Create directories - avoid nested Android folders
         output_dir_path = Path(output_dir).resolve()
-        android_dir = output_dir_path / "Android"
-        android_dir.mkdir(exist_ok=True)
         
-        pkg_dir = android_dir / package_name
+        # Check if output_dir is already named "Android" - if so, don't create another
+        if output_dir_path.name.lower() == "android":
+            pkg_dir = output_dir_path / package_name
+        else:
+            # Create Android subfolder only if not already in Android folder
+            android_dir = output_dir_path / "Android"
+            android_dir.mkdir(exist_ok=True)
+            pkg_dir = android_dir / package_name
+        
         pkg_dir.mkdir(parents=True, exist_ok=True)
         
         self.progress.emit(f"Created directory: {pkg_dir}")

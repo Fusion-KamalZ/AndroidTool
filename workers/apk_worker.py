@@ -35,6 +35,9 @@ class APKWorker(QThread):
             elif self.operation == "resign_apk":
                 result = self.resign_apk(self.args[0], self.args[1])
                 self.finished.emit(result)
+            elif self.operation == "convert_aab_to_apk":
+                result = self.convert_aab_to_apk(self.args[0], self.args[1])
+                self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
     
@@ -363,5 +366,137 @@ class APKWorker(QThread):
             'operation': 'resign',
             'input': str(apk_file),
             'output': str(signed_apk),
+            'success': True
+        }
+    
+    def convert_aab_to_apk(self, aab_path, output_dir):
+        """Convert AAB to signed APK using bundletool and uber-apk-signer"""
+        import zipfile
+        
+        self.progress.emit("Starting AAB to APK conversion...")
+        
+        aab_file = Path(aab_path).resolve()
+        if not aab_file.exists() or not aab_file.is_file():
+            raise Exception(f"AAB file not found: {aab_path}")
+        
+        if aab_file.suffix.lower() != '.aab':
+            raise Exception(f"Invalid file type. Expected .aab, got: {aab_file.suffix}")
+        
+        # Check if bundletool exists
+        bundletool_path = self.tools_dir / "bundletool-all.jar"
+        if not bundletool_path.exists():
+            raise Exception(
+                f"bundletool-all.jar not found at: {bundletool_path}\n"
+                f"Please ensure the tools directory exists with all required tools."
+            )
+        
+        # Check if uber-apk-signer exists
+        signer_path = self.tools_dir / "uber-apk-signer.jar"
+        if not signer_path.exists():
+            raise Exception(
+                f"uber-apk-signer.jar not found at: {signer_path}\n"
+                f"Please ensure the tools directory exists with all required tools."
+            )
+        
+        # Create output directory
+        output_path = Path(output_dir).resolve()
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        basename = aab_file.stem
+        apks_file = output_path / f"{basename}.apks"
+        
+        # Step 1: Build universal APK using bundletool
+        self.progress.emit("Building universal APK (unsigned)...")
+        
+        cmd = f'java -jar "{bundletool_path}" build-apks --bundle="{aab_file}" --output="{apks_file}" --mode=universal'
+        self.command.emit(cmd)
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            shell=True
+        )
+        
+        if result.returncode != 0:
+            error_msg = result.stderr if result.stderr else result.stdout
+            raise Exception(f"bundletool failed: {error_msg}")
+        
+        if not apks_file.exists():
+            raise Exception("APKS file was not created by bundletool")
+        
+        # Step 2: Extract universal.apk from .apks (it's a zip file)
+        self.progress.emit("Extracting universal.apk...")
+        
+        universal_apk = output_path / "universal.apk"
+        try:
+            with zipfile.ZipFile(apks_file, 'r') as zip_ref:
+                # Extract only universal.apk
+                zip_ref.extract("universal.apk", output_path)
+        except Exception as e:
+            raise Exception(f"Failed to extract universal.apk: {str(e)}")
+        
+        if not universal_apk.exists():
+            raise Exception("universal.apk not found in APKS archive")
+        
+        # Step 3: Sign the APK using uber-apk-signer
+        self.progress.emit("Signing APK with uber-apk-signer...")
+        
+        cmd = f'java -jar "{signer_path}" -a "{universal_apk}" --overwrite'
+        self.command.emit(cmd)
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            shell=True
+        )
+        
+        if result.returncode != 0:
+            error_msg = result.stderr if result.stderr else result.stdout
+            raise Exception(f"APK signing failed: {error_msg}")
+        
+        # Step 4: Rename to final output name
+        final_apk = output_path / f"{basename}-signed.apk"
+        if universal_apk.exists():
+            if final_apk.exists():
+                final_apk.unlink()
+            universal_apk.rename(final_apk)
+        
+        # Step 5: Cleanup temporary files
+        self.progress.emit("Cleaning up temporary files...")
+        
+        cleanup_files = [
+            apks_file,
+            output_path / f"{basename}.apks.idsig",
+            output_path / "universal.apk.idsig",
+            output_path / "toc.pb"
+        ]
+        
+        for cleanup_file in cleanup_files:
+            if cleanup_file.exists():
+                try:
+                    cleanup_file.unlink()
+                except:
+                    pass
+        
+        # Remove META-INF directory if exists
+        meta_inf = output_path / "META-INF"
+        if meta_inf.exists() and meta_inf.is_dir():
+            try:
+                shutil.rmtree(meta_inf)
+            except:
+                pass
+        
+        if not final_apk.exists():
+            raise Exception("Final signed APK was not created")
+        
+        self.progress.emit("✓ AAB to APK conversion completed successfully!")
+        self.command.emit("")
+        
+        return {
+            'operation': 'convert_aab_to_apk',
+            'input': str(aab_file),
+            'output': str(final_apk),
             'success': True
         }
